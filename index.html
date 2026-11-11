@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Twingo RPM</title>
+<style>
+/* Elrendezés: álló telefonon felül az ívmérő, alatta 6 csempe; fekvőben egymás mellett. */
+:root {
+  color-scheme: dark;
+  --bg: #000000;
+  --tile: #14161a;
+  --seg-off: #23262b;
+  --fg: #ffffff;
+  --muted: #a9afb8;
+  --dim: #6d737c;
+  --green: #19e36b;
+  --yellow: #ffd60a;
+  --red: #ff453a;
+  --cyan: #2fd6ee;
+  --cold: #6ea2ff;
+  --warn: #ffa826;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font);
+  display: flex; flex-direction: column; gap: 8px;
+  padding-block: max(8px, env(safe-area-inset-top, 0px)) max(8px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(12px, env(safe-area-inset-left, 0px));
+  padding-right: max(12px, env(safe-area-inset-right, 0px));
+  -webkit-user-select: none; user-select: none; overflow: hidden;
+}
+[hidden] { display: none !important; }
+
+header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#status { flex: 1 1 120px; min-width: 0; font-size: 14px; font-weight: 600; color: var(--muted); }
+#status.warn { color: var(--warn); }
+#status.ok { color: var(--green); }
+button {
+  font: inherit; font-size: 14px; font-weight: 600; color: var(--fg);
+  background: var(--tile); border: 1px solid #343840; border-radius: 10px;
+  min-height: 44px; padding: 0 14px;
+}
+button.primary { background: var(--green); border-color: var(--green); color: #00210d; }
+button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+main { flex: 1; min-height: 0; display: grid; gap: 10px; grid-template-rows: minmax(0, 1.25fr) minmax(0, 1fr); }
+@media (min-aspect-ratio: 1/1) {
+  main { grid-template-rows: minmax(0, 1fr); grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+#gaugeWrap { min-height: 0; min-width: 0; display: flex; align-items: center; justify-content: center; }
+#gauge { width: 100%; height: 100%; }
+#gauge text { font-family: var(--font); font-variant-numeric: tabular-nums; text-anchor: middle; }
+
+#tiles { min-height: 0; display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+.tile { background: var(--tile); border-radius: 12px; padding: 8px 12px; display: flex; flex-direction: column; justify-content: space-between; min-height: 0; overflow: hidden; }
+.tile .lab { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.tile .val { font-size: clamp(22px, 5.2vh, 40px); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+.tile .unit { font-size: 0.5em; font-weight: 500; color: var(--muted); margin-left: 4px; }
+
+details { font-size: 11px; color: var(--dim); }
+details summary { min-height: 28px; display: flex; align-items: center; }
+#log { margin: 4px 0 0; max-height: 30vh; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted); -webkit-user-select: text; user-select: text; }
+</style>
+</head>
+<body>
+
+<header>
+  <div id="status" role="status">Nincs kapcsolat</div>
+  <button id="btnConnect" class="primary" type="button">Csatlakozás</button>
+  <button id="btnDemo" type="button">Demó</button>
+  <button id="btnFull" type="button" aria-label="Teljes képernyő">⛶</button>
+</header>
+
+<main>
+  <div id="gaugeWrap">
+    <svg id="gauge" viewBox="0 0 240 224" role="img" aria-label="Fordulatszám">
+      <g id="segs"></g>
+      <text id="tRpm" x="120" y="132" font-size="46" font-weight="700" fill="#ffffff">----</text>
+      <text id="tLab" x="120" y="152" font-size="12" font-weight="600" fill="#a9afb8" letter-spacing="1.5">RPM</text>
+      <text id="tSpeed" x="120" y="186" font-size="22" font-weight="700" fill="#2fd6ee">-- km/h</text>
+    </svg>
+  </div>
+
+  <div id="tiles">
+    <div class="tile"><div class="lab">Hűtővíz</div><div class="val"><span id="vCool">--</span><span class="unit">°C</span></div></div>
+    <div class="tile"><div class="lab">Akku</div><div class="val"><span id="vVolt">--</span><span class="unit">V</span></div></div>
+    <div class="tile"><div class="lab">Terhelés</div><div class="val"><span id="vLoad">--</span><span class="unit">%</span></div></div>
+    <div class="tile"><div class="lab">Szívócső</div><div class="val"><span id="vMap">--</span><span class="unit">kPa</span></div></div>
+    <div class="tile"><div class="lab">Fojtószelep</div><div class="val"><span id="vThr">--</span><span class="unit">%</span></div></div>
+    <div class="tile"><div class="lab">Beszívott levegő</div><div class="val"><span id="vIat">--</span><span class="unit">°C</span></div></div>
+  </div>
+</main>
+
+<details>
+  <summary>ELM napló</summary>
+  <pre id="log"></pre>
+</details>
+
+<script>
+'use strict';
+// ------------------------------------------------------------ beállítások
+// A Web Bluetooth nem engedi MAC-cím szerinti csatlakozást (a böngésző el is rejti a címet),
+// ezért az adapter NEVE és a szolgáltatása van beégetve.
+const ADAPTER_NAME = 'OBDII';
+const SVC_UUID = 0xfff0, RX_UUID = 0xfff1, TX_UUID = 0xfff2;   // FFF1 = notify, FFF2 = write
+const RPM_MAX = 7000, RPM_YELLOW = 4500, RPM_RED = 5800;
+
+// ------------------------------------------------------------ állapot
+const vals = { rpm: null, speed: null, cool: null, volt: null, load: null, map: null, thr: null, iat: null };
+let state = 'idle';            // idle | ble | elm | ok | noecu | demo
+let device = null, txChar = null, connected = false, wantConnection = false;
+let runGen = 0, demoTimer = null, wakeLock = null;
+
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const STATUS = {
+  idle:  ['Nincs kapcsolat', ''],
+  ble:   ['Csatlakozás az adapterhez…', 'warn'],
+  elm:   ['ELM327 indítása…', 'warn'],
+  ok:    ['Kapcsolódva', 'ok'],
+  noecu: ['Nincs válasz a motorvezérlőtől (gyújtás?)', 'warn'],
+  demo:  ['Demó mód (nem valós adatok)', 'warn'],
+};
+function setState(s, customText) {
+  state = s;
+  const el = $('status');
+  el.textContent = customText || STATUS[s][0];
+  el.className = STATUS[s][1];
+  $('btnConnect').textContent = (wantConnection ? 'Bontás' : 'Csatlakozás');
+  $('btnConnect').classList.toggle('primary', !wantConnection);
+}
+function clearVals() { for (const k in vals) vals[k] = null; }
+
+const logLines = [];
+function log(line) {
+  logLines.push(line);
+  if (logLines.length > 40) logLines.shift();
+  $('log').textContent = logLines.join('\n');
+}
+
+// ------------------------------------------------------------ BLE + ELM327
+let rxBuf = '', rxFinish = null;
+const enc = new TextEncoder(), dec = new TextDecoder();
+
+function onRx(ev) {
+  const s = dec.decode(ev.target.value);
+  for (const c of s) {
+    if (c === '>') { if (rxFinish) rxFinish(); }   // '>' = ELM prompt, a válasz vége
+    else rxBuf += c;
+  }
+}
+
+function elm(cmd, timeout = 1500) {
+  return new Promise((resolve) => {
+    rxBuf = '';
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true; clearTimeout(t); rxFinish = null;
+      const out = rxBuf.replace(/[\r\n]+/g, ' ').trim();
+      log('> ' + cmd + '   < ' + out);
+      resolve(out);
+    };
+    const t = setTimeout(finish, timeout);
+    rxFinish = finish;
+    const data = enc.encode(cmd + '\r');
+    const w = txChar.writeValueWithResponse ? txChar.writeValueWithResponse(data) : txChar.writeValue(data);
+    w.catch(finish);
+  });
+}
+
+async function initElm() {
+  await elm('ATZ', 3000);
+  for (const c of ['ATE0', 'ATL0', 'ATS0', 'ATH0', 'ATAT1', 'ATSP6']) await elm(c);   // SP6 = CAN 11 bit 500k
+  const r = (await elm('0100', 6000)).replace(/ /g, '');
+  return r.includes('4100');
+}
+
+// Mode 01 PID. A végére tett "1": egy válaszsort várunk, így az ELM nem vár a timeoutra.
+async function readPid(pid, nBytes) {
+  const hex = pid.toString(16).toUpperCase().padStart(2, '0');
+  const r = (await elm('01' + hex + '1', 800)).replace(/ /g, '').toUpperCase();
+  const i = r.indexOf('41' + hex);
+  if (i < 0 || r.length < i + 4 + 2 * nBytes) return null;
+  const v = parseInt(r.substr(i + 4, 2 * nBytes), 16);
+  return Number.isNaN(v) ? null : v;
+}
+
+const PIDS = {
+  0x0C: [2, (v) => { vals.rpm   = v / 4; }],
+  0x0D: [1, (v) => { vals.speed = v; }],
+  0x05: [1, (v) => { vals.cool  = v - 40; }],
+  0x42: [2, (v) => { vals.volt  = v / 1000; }],
+  0x04: [1, (v) => { vals.load  = v * 100 / 255; }],
+  0x0B: [1, (v) => { vals.map   = v; }],
+  0x11: [1, (v) => { vals.thr   = v * 100 / 255; }],
+  0x0F: [1, (v) => { vals.iat   = v - 40; }],
+};
+async function pollPid(pid) {
+  const v = await readPid(pid, PIDS[pid][0]);
+  if (v === null) return false;
+  PIDS[pid][1](v);
+  return true;
+}
+// minden ciklus: fordulatszám + egy másik érték (a sebesség minden másodikban)
+const OTHERS = [0x0D, 0x05, 0x0D, 0x42, 0x0D, 0x04, 0x0D, 0x0B, 0x0D, 0x11, 0x0D, 0x0F];
+
+async function pollLoop() {
+  const gen = ++runGen;
+  setState('elm');
+  setState((await initElm()) ? 'ok' : 'noecu');
+  let fails = 0, cycle = 0;
+  while (connected && gen === runGen) {
+    const ok = await pollPid(0x0C);
+    if (!connected || gen !== runGen) break;
+    await pollPid(OTHERS[cycle++ % OTHERS.length]);
+    if (ok) { fails = 0; if (state !== 'ok') setState('ok'); }
+    else if (++fails >= 5) {
+      setState('noecu'); vals.rpm = null;
+      if (fails % 5 === 0 && (await initElm())) { fails = 0; setState('ok'); }
+      await sleep(500);
+    }
+  }
+}
+
+async function openGatt() {
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC_UUID);
+  const rx = await svc.getCharacteristic(RX_UUID);
+  txChar = await svc.getCharacteristic(TX_UUID);
+  rx.addEventListener('characteristicvaluechanged', onRx);
+  await rx.startNotifications();
+  connected = true;
+}
+
+async function connectLoop() {
+  // addig próbálkozik, amíg sikerül (vagy a felhasználó bontja)
+  while (wantConnection && !connected) {
+    setState('ble');
+    try { await openGatt(); }
+    catch (e) { log('BLE hiba: ' + e.message); await sleep(2000); }
+  }
+  if (connected && wantConnection) pollLoop();
+}
+
+function onDisconnected() {
+  connected = false; runGen++; if (rxFinish) rxFinish();
+  clearVals();
+  if (wantConnection) connectLoop(); else setState('idle');
+}
+
+function useDevice(d) {
+  if (device) device.removeEventListener('gattserverdisconnected', onDisconnected);
+  device = d;
+  device.addEventListener('gattserverdisconnected', onDisconnected);
+}
+
+async function connectClicked() {
+  if (wantConnection) {                       // Bontás
+    wantConnection = false; runGen++;
+    if (device && device.gatt.connected) device.gatt.disconnect(); else { connected = false; clearVals(); setState('idle'); }
+    return;
+  }
+  if (!navigator.bluetooth) {
+    setState('idle', 'Ez a böngésző nem tud Web Bluetooth-t. Androidos Chrome kell, HTTPS-en megnyitva.');
+    $('status').className = 'warn';
+    return;
+  }
+  stopDemo();
+  try {
+    const d = await navigator.bluetooth.requestDevice({
+      filters: [{ name: ADAPTER_NAME }, { services: [SVC_UUID] }],
+      optionalServices: [SVC_UUID],
+    });
+    useDevice(d);
+  } catch (e) { log('Eszközválasztás megszakítva: ' + e.message); return; }
+  wantConnection = true;
+  requestWakeLock();
+  connectLoop();
+}
+
+// Ha a Chrome megjegyezte az engedélyt (getDevices), gombnyomás nélkül is megpróbálunk csatlakozni.
+async function tryAutoConnect() {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
+  try {
+    const list = await navigator.bluetooth.getDevices();
+    const d = list.find((x) => x.name === ADAPTER_NAME) || list[0];
+    if (!d) return;
+    useDevice(d);
+    wantConnection = true;
+    if (d.watchAdvertisements) {
+      setState('ble');
+      const ac = new AbortController();
+      await new Promise((res) => {
+        d.addEventListener('advertisementreceived', res, { once: true });
+        d.watchAdvertisements({ signal: ac.signal }).catch(res);
+        setTimeout(res, 8000);
+      });
+      ac.abort();
+    }
+    if (wantConnection && !connected) connectLoop();
+  } catch (e) { log('Automatikus csatlakozás nem ment: ' + e.message); }
+}
+
+// ------------------------------------------------------------ demó
+function startDemo() {
+  if (wantConnection) return;
+  const t0 = performance.now();
+  setState('demo');
+  demoTimer = setInterval(() => {
+    const t = (performance.now() - t0) / 1000;
+    const saw = (t % 9) / 9;                                  // gyorsítás, majd váltás
+    vals.rpm = 900 + saw * 5600;
+    vals.speed = 20 + ((t % 27) / 27) * 90;
+    vals.cool = Math.min(88, 40 + t * 1.5);
+    vals.volt = 14.1 + Math.sin(t / 3) * 0.15;
+    vals.load = 25 + saw * 60;
+    vals.map = 35 + saw * 60;
+    vals.thr = 12 + saw * 70;
+    vals.iat = 28;
+  }, 120);
+}
+function stopDemo() {
+  if (!demoTimer) return;
+  clearInterval(demoTimer); demoTimer = null; clearVals(); setState('idle');
+}
+
+// ------------------------------------------------------------ képernyő ébren tartása
+async function requestWakeLock() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { /* nem baj */ }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && (wantConnection || demoTimer)) requestWakeLock();
+});
+
+// ------------------------------------------------------------ rajzolás
+const N = 35, A0 = 30, A1 = 330, CX = 120, CY = 116, RO = 112, RI = 92;   // 0° = 6 óra, óramutató szerint
+const segEls = [];
+(function buildGauge() {
+  const step = (A1 - A0) / N;
+  const P = (r, deg) => {
+    const a = deg * Math.PI / 180;
+    return (CX - r * Math.sin(a)).toFixed(2) + ' ' + (CY + r * Math.cos(a)).toFixed(2);
+  };
+  const g = $('segs');
+  for (let i = 0; i < N; i++) {
+    const a0 = A0 + i * step, a1 = a0 + step - 1.4;
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d', 'M' + P(RO, a0) + 'A' + RO + ' ' + RO + ' 0 0 1 ' + P(RO, a1) +
+                        'L' + P(RI, a1) + 'A' + RI + ' ' + RI + ' 0 0 0 ' + P(RI, a0) + 'Z');
+    p.setAttribute('fill', '#23262b');
+    g.appendChild(p);
+    segEls.push({ el: p, color: '#23262b' });
+  }
+})();
+
+function segColor(i) {
+  const at = (i + 1) * (RPM_MAX / N);
+  return at > RPM_RED ? '#ff453a' : at > RPM_YELLOW ? '#ffd60a' : '#19e36b';
+}
+function setText(id, txt, fill) {
+  const el = $(id);
+  if (el.textContent !== txt) el.textContent = txt;
+  if (fill !== undefined) {
+    if (el.namespaceURI.includes('svg')) { if (el.getAttribute('fill') !== fill) el.setAttribute('fill', fill); }
+    else if (el.style.color !== fill) el.style.color = fill;
+  }
+}
+const fmt = (v, d = 0) => (v === null ? '--' : v.toFixed(d));
+
+let dispRpm = 0;
+function frame() {
+  dispRpm += ((vals.rpm ?? 0) - dispRpm) * 0.25;                  // simított mutató
+  const lit = Math.min(N, Math.floor(dispRpm / (RPM_MAX / N) + 0.5));
+  for (let i = 0; i < N; i++) {
+    const want = i < lit ? segColor(i) : '#23262b';
+    if (segEls[i].color !== want) { segEls[i].el.setAttribute('fill', want); segEls[i].color = want; }
+  }
+  setText('tRpm', vals.rpm === null ? '----' : String(Math.floor((vals.rpm + 5) / 10) * 10),
+          vals.rpm !== null && vals.rpm > RPM_RED ? '#ff453a' : '#ffffff');
+  setText('tSpeed', (vals.speed === null ? '--' : Math.round(vals.speed)) + ' km/h');
+
+  const c = vals.cool;
+  setText('vCool', fmt(c), c === null ? '' : c > 105 ? 'var(--red)' : c < 60 ? 'var(--cold)' : '');
+  const v = vals.volt;
+  setText('vVolt', fmt(v, 1), v !== null && v < 12.5 ? 'var(--warn)' : '');
+  setText('vLoad', fmt(vals.load));
+  setText('vMap', fmt(vals.map));
+  setText('vThr', fmt(vals.thr));
+  setText('vIat', fmt(vals.iat));
+  requestAnimationFrame(frame);
+}
+
+// ------------------------------------------------------------ indulás
+$('btnConnect').addEventListener('click', connectClicked);
+$('btnDemo').addEventListener('click', () => { if (demoTimer) stopDemo(); else { startDemo(); requestWakeLock(); } });
+$('btnFull').addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+});
+setState('idle');
+requestAnimationFrame(frame);
+tryAutoConnect();
+</script>
+</body>
+</html>
