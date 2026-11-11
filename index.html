@@ -204,7 +204,15 @@ const PIDS = {
   0x11: [1, (v) => { vals.thr   = v * 100 / 255; }],
   0x0F: [1, (v) => { vals.iat   = v - 40; }],
 };
+// A motorvezérlő nem támogatja a 0x42 PID-et, ezért a feszültséget az adapter méri (ATRV, pl. "14.2V").
+async function pollVolt() {
+  const m = (await elm('ATRV', 800)).match(/(\d+(?:\.\d+)?)\s*V/i);
+  if (!m) return false;
+  vals.volt = parseFloat(m[1]);
+  return true;
+}
 async function pollPid(pid) {
+  if (pid === 0x42) return pollVolt();
   const v = await readPid(pid, PIDS[pid][0]);
   if (v === null) return false;
   PIDS[pid][1](v);
