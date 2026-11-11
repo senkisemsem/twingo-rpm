@@ -66,6 +66,10 @@ main { flex: 1; min-height: 0; display: grid; gap: 10px; grid-template-rows: min
 
 details { font-size: 11px; color: var(--dim); }
 details summary { min-height: 28px; display: flex; align-items: center; }
+#advPanel { display: grid; gap: 8px; padding: 4px 0 8px; color: var(--muted); font-size: 12px; }
+#advPanel label { display: flex; align-items: center; gap: 8px; min-height: 36px; font-size: 14px; color: var(--fg); }
+#advPanel input { width: 20px; height: 20px; }
+#advInfo { white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; line-height: 1.5; }
 #log { margin: 4px 0 0; max-height: 30vh; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted); -webkit-user-select: text; user-select: text; }
 </style>
 </head>
@@ -80,11 +84,13 @@ details summary { min-height: 28px; display: flex; align-items: center; }
 
 <main>
   <div id="gaugeWrap">
-    <svg id="gauge" viewBox="0 0 240 224" role="img" aria-label="Fordulatszám">
+    <svg id="gauge" viewBox="0 0 240 238" role="img" aria-label="Fordulatszám">
       <g id="segs"></g>
       <text id="tRpm" x="120" y="132" font-size="46" font-weight="700" fill="#ffffff">----</text>
       <text id="tLab" x="120" y="152" font-size="12" font-weight="600" fill="#a9afb8" letter-spacing="1.5">RPM</text>
       <text id="tSpeed" x="120" y="186" font-size="22" font-weight="700" fill="#2fd6ee">-- km/h</text>
+      <text id="tAdv" x="120" y="218" font-size="16" font-weight="800" fill="#2fd6ee" letter-spacing="0.5"></text>
+      <text id="tAdv2" x="120" y="233" font-size="10" font-weight="600" fill="#a9afb8"></text>
     </svg>
   </div>
 
@@ -97,6 +103,16 @@ details summary { min-height: 28px; display: flex; align-items: center; }
     <div class="tile"><div class="lab">Beszívott levegő</div><div class="val"><span id="vIat">--</span><span class="unit">°C</span></div></div>
   </div>
 </main>
+
+<details>
+  <summary>Váltási tanács</summary>
+  <div id="advPanel">
+    <label><input type="checkbox" id="advOn" checked> Váltási tanács bekapcsolva</label>
+    <div id="advInfo"></div>
+    <div>A fokozatot az autó nem küldi: a program a fordulat/sebesség arányból tanulja meg menet közben (egyenletes haladásnál, 25 km/h fölött). Amíg nincs elég minta, becsült értékeket használ.</div>
+    <button id="btnAdvReset" type="button">Tanult fokozatok törlése</button>
+  </div>
+</details>
 
 <details>
   <summary>ELM napló</summary>
@@ -114,6 +130,7 @@ const RPM_MAX = 7000, RPM_YELLOW = 4500, RPM_RED = 5800;
 
 // ------------------------------------------------------------ állapot
 const vals = { rpm: null, speed: null, cool: null, volt: null, load: null, map: null, thr: null, iat: null };
+const ts = {};                 // PID -> mikor érkezett az utolsó érték (performance.now)
 let state = 'idle';            // idle | ble | elm | ok | noecu | demo
 let device = null, txChar = null, connected = false, wantConnection = false;
 let runGen = 0, demoTimer = null, wakeLock = null;
@@ -137,7 +154,7 @@ function setState(s, customText) {
   $('btnConnect').textContent = (wantConnection ? 'Bontás' : 'Csatlakozás');
   $('btnConnect').classList.toggle('primary', !wantConnection);
 }
-function clearVals() { for (const k in vals) vals[k] = null; }
+function clearVals() { for (const k in vals) vals[k] = null; for (const k in ts) delete ts[k]; }
 
 const logLines = [];
 function log(line) {
@@ -212,25 +229,30 @@ async function pollVolt() {
   return true;
 }
 async function pollPid(pid) {
-  if (pid === 0x42) return pollVolt();
+  if (pid === 0x42) { const ok = await pollVolt(); if (ok) ts[pid] = performance.now(); return ok; }
   const v = await readPid(pid, PIDS[pid][0]);
   if (v === null) return false;
   PIDS[pid][1](v);
+  ts[pid] = performance.now();
   return true;
 }
-// minden ciklus: fordulatszám + egy másik érték (a sebesség minden másodikban)
-const OTHERS = [0x0D, 0x05, 0x0D, 0x42, 0x0D, 0x04, 0x0D, 0x0B, 0x0D, 0x11, 0x0D, 0x0F];
+// Lekérdezési sorrend: a fordulat a legsűrűbb, a sebesség és a terhelés (a váltási tanácshoz kell)
+// minden ciklusban sorra kerül, a null helyére a lassan változó értékek közül jön egy.
+const SEQ = [0x0C, 0x0D, 0x0C, 0x04, 0x0C, null];
+const ROT = [0x11, 0x05, 0x11, 0x42, 0x11, 0x0B, 0x11, 0x0F];
 
 async function pollLoop() {
   const gen = ++runGen;
   setState('elm');
   setState((await initElm()) ? 'ok' : 'noecu');
-  let fails = 0, cycle = 0;
+  let fails = 0, i = 0, rot = 0;
   while (connected && gen === runGen) {
-    const ok = await pollPid(0x0C);
+    let pid = SEQ[i++ % SEQ.length];
+    if (pid === null) pid = ROT[rot++ % ROT.length];
+    const ok = await pollPid(pid);
     if (!connected || gen !== runGen) break;
-    await pollPid(OTHERS[cycle++ % OTHERS.length]);
-    if (ok) { fails = 0; if (state !== 'ok') setState('ok'); }
+    if (pid !== 0x0C) continue;
+    if (ok) { fails = 0; if (state !== 'ok') setState('ok'); learnStep(); }
     else if (++fails >= 5) {
       setState('noecu'); vals.rpm = null;
       if (fails % 5 === 0 && (await initElm())) { fails = 0; setState('ok'); }
@@ -318,27 +340,184 @@ async function tryAutoConnect() {
   } catch (e) { log('Automatikus csatlakozás nem ment: ' + e.message); }
 }
 
+// ------------------------------------------------------------ váltási tanácsadó
+// Az autó nem küldi a fokozatot, de fordulat / sebesség = fokozatonként (közel) állandó szám.
+// A program ezt menet közben megtanulja (hisztogram csúcsai); addig becsült értékekkel számol.
+const PRIOR_K = [130, 70, 46, 34, 27];       // fordulat per km/h az 1..5. fokozatban (becslés)
+const ADV = {
+  on: true,
+  minSpeed: 15, gearTol: 0.10,               // ennél kisebb sebességnél / eltérésnél nincs fokozat-felismerés
+  lugRpm: 2000, lugLoad: 65,                 // erőlködik: ennyi fordulat alatt, ennyi terhelésnél
+  deepRpm: 1500, deepLoad: 35,               // nagyon erőlködik (piros)
+  downMaxRpm: 4200,                          // visszaváltás után legfeljebb ennyi fordulat legyen
+  upRpm: 2500, upMinLoad: 15, upMaxThr: 75,  // felváltás: ennyi fordulat fölött, nem szabadonfutás, nem padlógáz
+  upAfterMinRpm: 1600, upAfterMaxLoad: 85,   // a feljebb váltás után se erőlködjön
+  holdUp: 1000, holdDown: 700, dropMs: 500, settleMs: 2500, maxAge: 1500,
+  learnMinSpeed: 25, minPeak: 30,
+};
+const BIN = 0.03, LN0 = Math.log(10), NB = 110;   // a k = fordulat/sebesség logaritmikus tárolói
+const LS_KEY = 'twingo-gears-v1', LS_ON = 'twingo-adv-on';
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* nem baj */ } };
+
+let hist = new Array(NB).fill(0), histDirty = false, lastK = null;
+(function loadHist() {
+  const s = lsGet(LS_KEY);
+  if (!s) return;
+  try { const a = JSON.parse(s); if (Array.isArray(a) && a.length === NB) hist = a.map(Number); } catch (e) { /* üres marad */ }
+})();
+ADV.on = lsGet(LS_ON) !== '0';
+
+function learnStep() {
+  if (demoTimer) return;
+  const r = vals.rpm, v = vals.speed;
+  if (r === null || v === null || v < ADV.learnMinSpeed || r < 1000) { lastK = null; return; }
+  if (Math.abs((ts[0x0C] ?? 0) - (ts[0x0D] ?? 0)) > 600) return;
+  const k = r / v;
+  const stable = lastK !== null && Math.abs(k / lastK - 1) < 0.03;   // egyenletes haladás, tengelykapcsoló kapcsolva
+  lastK = k;
+  if (!stable) return;
+  const b = Math.round((Math.log(k) - LN0) / BIN);
+  if (b >= 0 && b < NB) { hist[b] += 1; histDirty = true; }
+}
+
+function buildTable(h = hist) {
+  const sm = h.map((x, i) => (h[i - 1] || 0) * 0.5 + x + (h[i + 1] || 0) * 0.5);
+  const cand = [];
+  for (let i = 0; i < NB; i++) if (sm[i] >= ADV.minPeak && sm[i] >= (sm[i - 1] || 0) && sm[i] >= (sm[i + 1] || 0)) cand.push(i);
+  cand.sort((a, b) => sm[b] - sm[a]);
+  const peaks = [];
+  for (const i of cand) {
+    if (peaks.some((p) => Math.abs(p.i - i) < 4)) continue;
+    let w = 0, sx = 0;
+    for (let j = i - 2; j <= i + 2; j++) { const x = h[j] || 0; w += x; sx += x * j; }
+    peaks.push({ i, n: w, k: Math.exp(LN0 + BIN * sx / w) });
+  }
+  const t = PRIOR_K.map((k) => ({ k, n: 0, learned: false }));
+  for (const p of peaks) {
+    let best = -1, bd = 0.3;
+    PRIOR_K.forEach((k, g) => { const d = Math.abs(Math.log(p.k / k)); if (d < bd) { bd = d; best = g; } });
+    if (best >= 0 && p.n > t[best].n) t[best] = { k: p.k, n: p.n, learned: true };
+  }
+  // a nem tanult fokozatokat a tanultak átlagos eltérésével korrigáljuk
+  const L = t.map((e, g) => e.learned ? Math.log(e.k / PRIOR_K[g]) : null).filter((x) => x !== null);
+  if (L.length) {
+    const scale = Math.exp(L.reduce((a, b) => a + b, 0) / L.length);
+    t.forEach((e, g) => { if (!e.learned) e.k = PRIOR_K[g] * scale; });
+  }
+  return t;
+}
+let gearTable = buildTable();
+
+function gearOf(k, table = gearTable) {
+  let best = -1, bd = ADV.gearTol;
+  table.forEach((e, g) => { const d = Math.abs(Math.log(k / e.k)); if (d < bd) { bd = d; best = g; } });
+  return best;
+}
+
+// s = {rpm, speed, load, thr}; gear: 1-től, 0 = ismeretlen. target: 1-től.
+function evalAdvice(s, table = gearTable) {
+  if (s.rpm == null || s.speed == null || s.speed < ADV.minSpeed || s.rpm < 900) return { gear: 0, dir: null };
+  const g = gearOf(s.rpm / s.speed, table);
+  if (g < 0) return { gear: 0, dir: null };
+  const out = { gear: g + 1, dir: null };
+  if (s.load == null) return out;
+  const strong = s.rpm < ADV.deepRpm && s.load > ADV.deepLoad;
+  if (strong || (s.rpm < ADV.lugRpm && s.load > ADV.lugLoad)) {
+    if (g > 0) {
+      const after = s.rpm * table[g - 1].k / table[g].k;
+      if (after <= ADV.downMaxRpm) return { ...out, dir: 'down', strong, target: g, rpmAfter: after };
+    }
+    return out;
+  }
+  if (g < table.length - 1 && s.load >= ADV.upMinLoad && s.rpm >= ADV.upRpm &&
+      (s.thr == null || s.thr <= ADV.upMaxThr || s.rpm >= 4500)) {
+    const after = s.rpm * table[g + 1].k / table[g].k;
+    if (after >= ADV.upAfterMinRpm && s.load * s.rpm / after <= ADV.upAfterMaxLoad)
+      return { ...out, dir: 'up', target: g + 2, rpmAfter: after };
+  }
+  return out;
+}
+
+const adv = { shown: null, cand: null, since: 0, lastSeen: 0, gear: 0, gearSince: 0 };
+function advStep(now) {
+  const fresh = (pid, max) => ts[pid] !== undefined && now - ts[pid] <= max;
+  const c = evalAdvice({
+    rpm: fresh(0x0C, ADV.maxAge) ? vals.rpm : null,
+    speed: fresh(0x0D, ADV.maxAge) ? vals.speed : null,
+    load: fresh(0x04, ADV.maxAge * 2) ? vals.load : null,
+    thr: fresh(0x11, 3000) ? vals.thr : null,
+  });
+  if (c.gear !== adv.gear) { adv.gear = c.gear; adv.gearSince = now; }
+  let dir = ADV.on ? c.dir : null;
+  if (dir === 'up' && now - adv.gearSince < ADV.settleMs) dir = null;   // váltás után hagyjuk megnyugodni
+  if (dir !== adv.cand) { adv.cand = dir; adv.since = now; }
+  if (dir) {
+    if (adv.shown && adv.shown.dir !== dir) adv.shown = null;
+    if (now - adv.since >= (dir === 'up' ? ADV.holdUp : ADV.holdDown)) { adv.shown = c; adv.lastSeen = now; }
+  } else if (adv.shown && now - adv.lastSeen > ADV.dropMs) adv.shown = null;
+}
+
+function advInfoText() {
+  return gearTable.map((e, g) =>
+    (g + 1) + '. fok.: ' + (1000 / e.k).toFixed(1).padStart(5) + ' km/h / 1000 ford.  ' +
+    (e.learned ? 'tanult (' + Math.round(e.n) + ' minta)' : 'becsült')).join('\n');
+}
+function refreshTable() {
+  if (demoTimer) return;
+  if (hist.reduce((a, b) => a + b, 0) > 6000) hist = hist.map((x) => x / 2);
+  gearTable = buildTable();
+  $('advInfo').textContent = advInfoText();
+}
+function saveHist() {
+  if (!histDirty || demoTimer) return;
+  lsSet(LS_KEY, JSON.stringify(hist.map((x) => Math.round(x * 10) / 10)));
+  histDirty = false;
+}
+setInterval(() => { refreshTable(); }, 2000);
+setInterval(saveHist, 20000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveHist(); });
+
 // ------------------------------------------------------------ demó
+// [másodperc, fokozat, sebesség-ből, sebesség-ig, terhelés %, fojtószelep %]
+const DEMO = [
+  [6, 1, 5, 26, 60, 45],     // gyorsítás, majd felváltás javaslat
+  [7, 2, 26, 45, 50, 40],
+  [7, 3, 45, 62, 45, 35],
+  [8, 4, 62, 90, 40, 32],
+  [5, 5, 90, 90, 28, 25],    // egyenletes haladás, nincs tanács
+  [3, 5, 90, 55, 6, 0],      // szabadonfutás
+  [6, 5, 55, 55, 80, 70],    // emelkedő, 5.-ben erőlködik -> visszaváltás
+  [5, 4, 55, 55, 50, 42],    // megfogadta a tanácsot
+  [3, 4, 55, 20, 6, 0],
+];
 function startDemo() {
   if (wantConnection) return;
   const t0 = performance.now();
+  const total = DEMO.reduce((a, d) => a + d[0], 0);
   setState('demo');
+  gearTable = PRIOR_K.map((k) => ({ k, n: 0, learned: false }));
+  adv.shown = null; adv.cand = null; adv.gear = 0;
   demoTimer = setInterval(() => {
-    const t = (performance.now() - t0) / 1000;
-    const saw = (t % 9) / 9;                                  // gyorsítás, majd váltás
-    vals.rpm = 900 + saw * 5600;
-    vals.speed = 20 + ((t % 27) / 27) * 90;
+    const now = performance.now(), t = (now - t0) / 1000;
+    let u = t % total, seg = DEMO[0];
+    for (const d of DEMO) { if (u < d[0]) { seg = d; break; } u -= d[0]; }
+    const [dur, g, v0, v1, load, thr] = seg;
+    const v = v0 + (v1 - v0) * (u / dur);
+    vals.speed = Math.round(v);
+    vals.rpm = Math.max(900, v * PRIOR_K[g - 1]);
+    vals.load = load; vals.thr = thr;
+    vals.map = 25 + load * 0.75;
     vals.cool = Math.min(88, 40 + t * 1.5);
     vals.volt = 14.1 + Math.sin(t / 3) * 0.15;
-    vals.load = 25 + saw * 60;
-    vals.map = 35 + saw * 60;
-    vals.thr = 12 + saw * 70;
     vals.iat = 28;
+    for (const p of [0x0C, 0x0D, 0x04, 0x11]) ts[p] = now;
   }, 120);
 }
 function stopDemo() {
   if (!demoTimer) return;
   clearInterval(demoTimer); demoTimer = null; clearVals(); setState('idle');
+  adv.shown = null; refreshTable();
 }
 
 // ------------------------------------------------------------ képernyő ébren tartása
@@ -395,6 +574,14 @@ function frame() {
   setText('tRpm', vals.rpm === null ? '----' : String(Math.floor((vals.rpm + 5) / 10) * 10),
           vals.rpm !== null && vals.rpm > RPM_RED ? '#ff453a' : '#ffffff');
   setText('tSpeed', (vals.speed === null ? '--' : Math.round(vals.speed)) + ' km/h');
+  advStep(performance.now());
+  setText('tLab', 'RPM' + (adv.gear > 0 ? '  ·  ' + adv.gear + '. fokozat' : ''));
+  const sh = adv.shown;
+  if (sh) {
+    setText('tAdv', (sh.dir === 'up' ? '▲ FEL  ' : '▼ VISSZA  ') + sh.target + '.',
+            sh.dir === 'up' ? '#2fd6ee' : sh.strong ? '#ff453a' : '#ffd60a');
+    setText('tAdv2', 'utána kb. ' + (Math.round(sh.rpmAfter / 100) * 100) + ' ford./perc');
+  } else { setText('tAdv', ''); setText('tAdv2', ''); }
 
   const c = vals.cool;
   setText('vCool', fmt(c), c === null ? '' : c > 105 ? 'var(--red)' : c < 60 ? 'var(--cold)' : '');
@@ -414,6 +601,10 @@ $('btnFull').addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen().catch(() => {});
 });
+$('advOn').checked = ADV.on;
+$('advOn').addEventListener('change', (e) => { ADV.on = e.target.checked; lsSet(LS_ON, ADV.on ? '1' : '0'); });
+$('btnAdvReset').addEventListener('click', () => { hist = new Array(NB).fill(0); lastK = null; histDirty = false; lsSet(LS_KEY, ''); refreshTable(); });
+refreshTable();
 setState('idle');
 requestAnimationFrame(frame);
 tryAutoConnect();

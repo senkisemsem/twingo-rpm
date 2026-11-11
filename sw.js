@@ -1,6 +1,6 @@
 // Twingo RPM service worker
 // Hálózat először (így a frissítés azonnal megjelenik), hiba esetén a tárolt változat (térerő nélkül is elindul).
-const CACHE = 'twingo-rpm-v1';
+const CACHE = 'twingo-rpm-v2';
 const FILES = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'];
 
 self.addEventListener('install', (e) => {
