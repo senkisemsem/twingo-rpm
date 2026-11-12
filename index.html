@@ -92,9 +92,8 @@ details summary { min-height: 28px; display: flex; align-items: center; }
       <text id="tRpm" x="120" y="132" font-size="46" font-weight="700" fill="#ffffff">----</text>
       <text id="tLab" x="120" y="152" font-size="12" font-weight="600" fill="#a9afb8" letter-spacing="1.5">RPM</text>
       <text id="tSpeed" x="120" y="186" font-size="22" font-weight="700" fill="#2fd6ee">-- km/h</text>
-      <text id="tAdv" x="120" y="218" font-size="16" font-weight="800" fill="#2fd6ee" letter-spacing="0.5"></text>
-      <text id="tAdv2" x="120" y="233" font-size="10" font-weight="600" fill="#a9afb8"></text>
-    </svg>
+      <text id="tAdv" x="120" y="232" font-size="46" font-weight="700" fill="#c9ced6">–</text>
+          </svg>
   </div>
 
   <div id="tiles">
@@ -370,7 +369,7 @@ let hist = new Array(NB).fill(0), histDirty = false, lastK = null;
   if (!s) return;
   try { const a = JSON.parse(s); if (Array.isArray(a) && a.length === NB) hist = a.map(Number); } catch (e) { /* üres marad */ }
 })();
-ADV.on = lsGet(LS_ON) !== '0';
+ADV.on = lsGet(LS_ON) === '1';   // alapból ki van kapcsolva
 let manual = {};                       // kézzel hozzárendelt fokozatok: {fokozat-index: k}
 try { manual = JSON.parse(lsGet(LS_MAN) || '{}') || {}; } catch (e) { manual = {}; }
 
@@ -621,13 +620,11 @@ function frame() {
           vals.rpm !== null && vals.rpm > RPM_RED ? '#ff453a' : '#ffffff');
   setText('tSpeed', (vals.speed === null ? '--' : Math.round(vals.speed)) + ' km/h');
   advStep(performance.now());
-  setText('tLab', 'RPM' + (adv.gear > 0 ? '  ·  ' + adv.gear + '. fokozat' : ''));
+  // Fokozat: világosszürke szám; ha a váltási tanács be van kapcsolva, a nyíl és a szín jelzi a javaslatot.
   const sh = adv.shown;
-  if (sh) {
-    setText('tAdv', (sh.dir === 'up' ? '▲ FEL  ' : '▼ VISSZA  ') + sh.target + '.',
-            sh.dir === 'up' ? '#2fd6ee' : sh.strong ? '#ff453a' : '#ffd60a');
-    setText('tAdv2', 'utána kb. ' + (Math.round(sh.rpmAfter / 100) * 100) + ' ford./perc');
-  } else { setText('tAdv', ''); setText('tAdv2', ''); }
+  const gTxt = adv.gear > 0 ? String(adv.gear) : '–';
+  setText('tAdv', sh ? (sh.dir === 'up' ? '▲ ' : '▼ ') + gTxt : gTxt,
+          sh ? (sh.dir === 'up' ? '#2fd6ee' : sh.strong ? '#ff453a' : '#ffd60a') : '#c9ced6');
 
   const c = vals.cool;
   setText('vCool', fmt(c), c === null ? '' : c > 105 ? 'var(--red)' : c < 60 ? 'var(--cold)' : '');
