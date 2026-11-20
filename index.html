@@ -60,6 +60,11 @@ main { flex: 1; min-height: 0; display: grid; gap: 10px; grid-template-rows: min
 
 #tiles { min-height: 0; display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
 .tile { background: var(--tile); border-radius: 12px; padding: 8px 12px; display: flex; flex-direction: column; justify-content: space-between; min-height: 0; overflow: hidden; }
+.tile[data-pid] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.tile.focus { box-shadow: inset 0 0 0 3px var(--cyan); }
+.tile[data-pid]:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.tile .lab { display: flex; justify-content: space-between; align-items: baseline; }
+.tile .hz { color: var(--cyan); letter-spacing: 0; text-transform: none; }
 .tile .lab { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .tile .val { font-size: clamp(22px, 5.2vh, 40px); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
 .tile .unit { font-size: 0.5em; font-weight: 500; color: var(--muted); margin-left: 4px; }
@@ -98,10 +103,10 @@ details summary { min-height: 28px; display: flex; align-items: center; }
 
   <div id="tiles">
     <div class="tile"><div class="lab">Hűtővíz</div><div class="val"><span id="vCool">--</span><span class="unit">°C</span></div></div>
-    <div class="tile"><div class="lab">Akku</div><div class="val"><span id="vVolt">--</span><span class="unit">V</span></div></div>
-    <div class="tile"><div class="lab">Terhelés</div><div class="val"><span id="vLoad">--</span><span class="unit">%</span></div></div>
-    <div class="tile"><div class="lab">Szívócső</div><div class="val"><span id="vMap">--</span><span class="unit">kPa</span></div></div>
-    <div class="tile"><div class="lab">Fojtószelep</div><div class="val"><span id="vThr">--</span><span class="unit">%</span></div></div>
+    <div class="tile" data-pid="66" role="button" tabindex="0" aria-pressed="false"><div class="lab">Akku<span class="hz"></span></div><div class="val"><span id="vVolt">--</span><span class="unit">V</span></div></div>
+    <div class="tile" data-pid="4" role="button" tabindex="0" aria-pressed="false"><div class="lab">Terhelés<span class="hz"></span></div><div class="val"><span id="vLoad">--</span><span class="unit">%</span></div></div>
+    <div class="tile" data-pid="11" role="button" tabindex="0" aria-pressed="false"><div class="lab">Szívócső<span class="hz"></span></div><div class="val"><span id="vMap">--</span><span class="unit">kPa</span></div></div>
+    <div class="tile" data-pid="17" role="button" tabindex="0" aria-pressed="false"><div class="lab">Fojtószelep<span class="hz"></span></div><div class="val"><span id="vThr">--</span><span class="unit">%</span></div></div>
     <div class="tile"><div class="lab">Beszívott levegő</div><div class="val"><span id="vIat">--</span><span class="unit">°C</span></div></div>
   </div>
 </main>
@@ -137,6 +142,7 @@ const ts = {};                 // PID -> mikor érkezett az utolsó érték (per
 let state = 'idle';            // idle | ble | elm | ok | noecu | demo
 let device = null, txChar = null, connected = false, wantConnection = false;
 let runGen = 0, demoTimer = null, wakeLock = null;
+let focusPid = null, multiFails = 0, hzCount = 0, hzT0 = performance.now();   // gyors mód: a kijelölt érték PID-je
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -244,17 +250,75 @@ async function pollPid(pid) {
 const SEQ = [0x0C, 0x0D, 0x0C, 0x04, 0x0C, null];
 const ROT = [0x11, 0x05, 0x11, 0x42, 0x11, 0x0B, 0x11, 0x0F];
 
+const hex2 = (p) => p.toString(16).toUpperCase().padStart(2, '0');
+// Több PID egy kérésben (pl. "010C0B1" -> "410C1AF80B3C"): egy körút a két értékre.
+function parseMulti(r, list) {
+  const out = [];
+  let i = r.indexOf('41' + hex2(list[0][0]));
+  if (i < 0) return out;
+  i += 2;
+  for (const [pid, n] of list) {
+    if (r.substr(i, 2) !== hex2(pid)) break;
+    const d = r.substr(i + 2, 2 * n);
+    if (d.length < 2 * n) break;
+    const v = parseInt(d, 16);
+    if (Number.isNaN(v)) break;
+    out.push([pid, v]);
+    i += 2 + 2 * n;
+  }
+  return out;
+}
+// Gyors mód: csak a fordulat és a kijelölt érték. A visszatérési érték: sikerült-e a fordulat.
+async function pollFocus(fp) {
+  if (fp === 0x42) {                                   // az akkufeszültség az adapterből jön (ATRV)
+    const ok = await pollPid(0x0C);
+    if (connected && await pollPid(0x42)) hzCount++;
+    return ok;
+  }
+  if (multiFails < 3) {
+    const r = (await elm('01' + hex2(0x0C) + hex2(fp) + '1', 800)).replace(/ /g, '').toUpperCase();
+    const got = parseMulti(r, [[0x0C, 2], [fp, PIDS[fp][0]]]);
+    const now = performance.now();
+    for (const [pid, v] of got) { PIDS[pid][1](v); ts[pid] = now; }
+    if (got.length === 2) { multiFails = 0; hzCount++; return true; }
+    if (got.length === 1) { multiFails++; return true; }   // csak az elsőre válaszolt: lehet, hogy nem tud többet
+    const ok = await pollPid(0x0C);                         // semmi válasz: külön kéréssel megnézzük
+    if (ok) multiFails = 3;                                 // egyesével megy, többesével nem
+    return ok;
+  }
+  const ok = await pollPid(0x0C);
+  if (connected && await pollPid(fp)) hzCount++;
+  return ok;
+}
+
+function setFocus(pid) {
+  focusPid = (pid === focusPid) ? null : pid;
+  for (const t of document.querySelectorAll('.tile[data-pid]')) {
+    const on = Number(t.dataset.pid) === focusPid;
+    t.classList.toggle('focus', on);
+    t.setAttribute('aria-pressed', on ? 'true' : 'false');
+    t.querySelector('.hz').textContent = '';
+  }
+  hzCount = 0; hzT0 = performance.now();
+}
+
 async function pollLoop() {
   const gen = ++runGen;
   setState('elm');
   setState((await initElm()) ? 'ok' : 'noecu');
   let fails = 0, i = 0, rot = 0;
+  multiFails = 0;
   while (connected && gen === runGen) {
-    let pid = SEQ[i++ % SEQ.length];
-    if (pid === null) pid = ROT[rot++ % ROT.length];
-    const ok = await pollPid(pid);
+    let ok, isRpm = true;
+    if (focusPid !== null) ok = await pollFocus(focusPid);
+    else {
+      let pid = SEQ[i++ % SEQ.length];
+      if (pid === null) pid = ROT[rot++ % ROT.length];
+      ok = await pollPid(pid);
+      isRpm = pid === 0x0C;
+    }
     if (!connected || gen !== runGen) break;
-    if (pid !== 0x0C) continue;
+    if (!isRpm) continue;
     if (ok) { fails = 0; if (state !== 'ok') setState('ok'); learnStep(); }
     else if (++fails >= 5) {
       setState('noecu'); vals.rpm = null;
@@ -618,7 +682,8 @@ function frame() {
   }
   setText('tRpm', vals.rpm === null ? '----' : String(Math.floor((vals.rpm + 5) / 10) * 10),
           vals.rpm !== null && vals.rpm > RPM_RED ? '#ff453a' : '#ffffff');
-  setText('tSpeed', (vals.speed === null ? '--' : Math.round(vals.speed)) + ' km/h');
+  const spFresh = vals.speed !== null && ts[0x0D] !== undefined && performance.now() - ts[0x0D] < 4000;   // gyors módban nem frissül
+  setText('tSpeed', (spFresh ? Math.round(vals.speed) : '--') + ' km/h');
   advStep(performance.now());
   // Fokozat: világosszürke szám; ha a váltási tanács be van kapcsolva, a nyíl és a szín jelzi a javaslatot.
   const sh = adv.shown;
@@ -644,6 +709,17 @@ $('btnFull').addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen().catch(() => {});
 });
+for (const t of document.querySelectorAll('.tile[data-pid]')) {
+  t.addEventListener('click', () => setFocus(Number(t.dataset.pid)));
+  t.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setFocus(Number(t.dataset.pid)); } });
+}
+$('gaugeWrap').addEventListener('click', () => { if (focusPid !== null) setFocus(focusPid); });   // a fordulatszámra bökve kilép
+setInterval(() => {                                   // a kijelölt érték mért frissítési üteme
+  const now = performance.now();
+  const el = focusPid !== null ? document.querySelector('.tile.focus .hz') : null;
+  if (el) el.textContent = connected ? (hzCount * 1000 / (now - hzT0)).toFixed(0) + ' Hz' : '';
+  hzCount = 0; hzT0 = now;
+}, 1000);
 $('advOn').checked = ADV.on;
 $('advOn').addEventListener('change', (e) => { ADV.on = e.target.checked; lsSet(LS_ON, ADV.on ? '1' : '0'); });
 $('btnAdvReset').addEventListener('click', () => { hist = new Array(NB).fill(0); lastK = null; histDirty = false; manual = {}; lsSet(LS_KEY, ''); lsSet(LS_MAN, ''); peaksSig = ''; refreshTable(); });
